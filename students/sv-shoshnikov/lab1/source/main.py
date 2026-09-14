@@ -7,11 +7,14 @@ from sklearn.linear_model import SGDClassifier
 
 
 class LinearClassifier:
-    def __init__(self, learning_rate=0.01, momentum=0.9, l2_reg=0.01, n_epochs=100):
+    def __init__(self, learning_rate=0.01, momentum=0.9, l2_reg=0.01, n_epochs=100, 
+                 use_fastest_descent=False, use_margin_sampling=False):
         self.lr = learning_rate
         self.momentum = momentum
         self.l2_reg = l2_reg
         self.n_epochs = n_epochs
+        self.use_fastest_descent = use_fastest_descent
+        self.use_margin_sampling = use_margin_sampling
         self.w = None
         self.b = None
         self.v_w = None
@@ -48,6 +51,29 @@ class LinearClassifier:
         self.w = np.random.randn(n_features) * 0.01
         self.b = 0.0
     
+    def compute_optimal_lr(self, X_batch, y_batch, grad_w, grad_b):
+        n = X_batch.shape[0]
+        predictions = X_batch @ self.w + self.b
+        margins = y_batch * predictions
+        errors = -2 * (1 - margins) * y_batch
+        
+        numerator = np.sum(errors ** 2)
+        denominator = grad_w @ (X_batch.T @ X_batch) @ grad_w + n * grad_b ** 2
+        
+        if denominator > 1e-8:
+            optimal_lr = numerator / (denominator + 1e-8)
+            return min(optimal_lr, 1.0)
+        return self.lr
+    
+    def sample_by_margin(self, X, y, batch_size):
+        margins = np.abs(self.compute_margin(X, y))
+        probabilities = 1.0 / (margins + 1e-8)
+        probabilities /= probabilities.sum()
+        
+        indices = np.random.choice(len(X), size=min(batch_size, len(X)), 
+                                   replace=False, p=probabilities)
+        return X[indices], y[indices]
+    
     def fit(self, X, y, init_method='correlation'):
         n_samples, n_features = X.shape
         
@@ -67,13 +93,21 @@ class LinearClassifier:
             
             batch_size = 32
             for i in range(0, n_samples, batch_size):
-                X_batch = X_shuffled[i:i + batch_size]
-                y_batch = y_shuffled[i:i + batch_size]
+                if self.use_margin_sampling:
+                    X_batch, y_batch = self.sample_by_margin(X, y, batch_size)
+                else:
+                    X_batch = X_shuffled[i:i + batch_size]
+                    y_batch = y_shuffled[i:i + batch_size]
                 
                 grad_w, grad_b = self.compute_gradient(X_batch, y_batch)
                 
-                self.v_w = self.momentum * self.v_w - self.lr * grad_w
-                self.v_b = self.momentum * self.v_b - self.lr * grad_b
+                if self.use_fastest_descent:
+                    current_lr = self.compute_optimal_lr(X_batch, y_batch, grad_w, grad_b)
+                else:
+                    current_lr = self.lr
+                
+                self.v_w = self.momentum * self.v_w - current_lr * grad_w
+                self.v_b = self.momentum * self.v_b - current_lr * grad_b
                 
                 self.w += self.v_w
                 self.b += self.v_b
@@ -178,7 +212,27 @@ def main():
     print(f"   Лучший результат: {best_acc:.4f}")
     visualize_margins(best_clf, X_test, y_test, "Мультистарт - лучшая модель")
     
-    print("\n4. Сравнение с эталонной реализацией (sklearn)...")
+    print("\n4. Обучение со скорейшим градиентным спуском...")
+    clf_fastest = LinearClassifier(learning_rate=0.01, momentum=0.9, l2_reg=0.001, 
+                                   n_epochs=100, use_fastest_descent=True)
+    clf_fastest.fit(X_train, y_train, init_method='correlation')
+    train_acc_fastest = clf_fastest.score(X_train, y_train)
+    test_acc_fastest = clf_fastest.score(X_test, y_test)
+    print(f"   Train accuracy: {train_acc_fastest:.4f}")
+    print(f"   Test accuracy: {test_acc_fastest:.4f}")
+    visualize_margins(clf_fastest, X_test, y_test, "Скорейший градиентный спуск")
+    
+    print("\n5. Обучение с предъявлением по модулю отступа...")
+    clf_margin = LinearClassifier(learning_rate=0.01, momentum=0.9, l2_reg=0.001, 
+                                  n_epochs=100, use_margin_sampling=True)
+    clf_margin.fit(X_train, y_train, init_method='random')
+    train_acc_margin = clf_margin.score(X_train, y_train)
+    test_acc_margin = clf_margin.score(X_test, y_test)
+    print(f"   Train accuracy: {train_acc_margin:.4f}")
+    print(f"   Test accuracy: {test_acc_margin:.4f}")
+    visualize_margins(clf_margin, X_test, y_test, "Предъявление по модулю отступа")
+    
+    print("\n6. Сравнение с эталонной реализацией (sklearn)...")
     baseline = SGDClassifier(
         loss='squared_hinge', penalty='l2', alpha=0.001,
         learning_rate='constant', eta0=0.01, max_iter=100, random_state=42
@@ -189,16 +243,18 @@ def main():
     print(f"   Train accuracy: {baseline_train:.4f}")
     print(f"   Test accuracy: {baseline_test:.4f}")
     
-    print("\n5. Визуализация истории обучения...")
-    visualize_loss([clf1.loss_history, best_clf.loss_history], 
-                   ['Корреляция', 'Мультистарт'])
+    print("\n7. Визуализация истории обучения...")
+    visualize_loss([clf1.loss_history, best_clf.loss_history, clf_fastest.loss_history, clf_margin.loss_history], 
+                   ['Корреляция', 'Мультистарт', 'Скорейший спуск', 'По модулю отступа'])
     
     print("\n" + "="*60)
     print("ИТОГИ:")
     print("="*60)
-    print(f"Корреляция:        Test = {test_acc1:.4f}")
-    print(f"Мультистарт:       Test = {best_acc:.4f}")
-    print(f"Эталон (sklearn):  Test = {baseline_test:.4f}")
+    print(f"Корреляция:              Test = {test_acc1:.4f}")
+    print(f"Мультистарт:             Test = {best_acc:.4f}")
+    print(f"Скорейший спуск:         Test = {test_acc_fastest:.4f}")
+    print(f"По модулю отступа:       Test = {test_acc_margin:.4f}")
+    print(f"Эталон (sklearn):        Test = {baseline_test:.4f}")
     print("\nВсе графики сохранены в текущей директории.")
     print("="*60)
 
