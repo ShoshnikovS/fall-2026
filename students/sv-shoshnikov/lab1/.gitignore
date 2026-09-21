@@ -1,0 +1,7 @@
+*.png
+*.jpg
+*.jpeg
+NOTES_FOR_ME.md
+__pycache__/
+*.pyc
+.DS_Store

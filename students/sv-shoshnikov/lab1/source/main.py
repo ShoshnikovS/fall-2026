@@ -62,7 +62,7 @@ class LinearClassifier:
         
         if denominator > 1e-8:
             optimal_lr = numerator / (denominator + 1e-8)
-            return min(optimal_lr, 1.0)
+            return np.clip(optimal_lr, 0.001, 0.1)
         return self.lr
     
     def sample_by_margin(self, X, y, batch_size):
