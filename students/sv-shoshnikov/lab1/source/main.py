@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from sklearn.datasets import load_breast_cancer
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import SGDClassifier
+from sklearn.linear_model import RidgeClassifier, SGDClassifier
 
 
 class LinearClassifier:
@@ -20,6 +20,7 @@ class LinearClassifier:
         self.v_w = None
         self.v_b = None
         self.loss_history = []
+        self.q_history = []
     
     def compute_margin(self, X, y):
         predictions = X @ self.w + self.b
@@ -41,37 +42,31 @@ class LinearClassifier:
         return grad_w, grad_b
     
     def init_weights_correlation(self, X, y):
-        n_features = X.shape[1]
-        correlations = np.array([np.corrcoef(X[:, i], y)[0, 1] for i in range(n_features)])
-        correlations = np.nan_to_num(correlations, 0)
-        self.w = correlations / (np.linalg.norm(correlations) + 1e-8)
-        self.b = np.mean(y)
+        self.w = (y @ X) / (X ** 2).sum(axis=0)
+        self.b = 0.0
     
     def init_weights_random(self, n_features):
         self.w = np.random.randn(n_features) * 0.01
         self.b = 0.0
     
     def compute_optimal_lr(self, X_batch, y_batch, grad_w, grad_b):
-        n = X_batch.shape[0]
-        predictions = X_batch @ self.w + self.b
-        margins = y_batch * predictions
-        errors = -2 * (1 - margins) * y_batch
+        direction = X_batch @ grad_w + grad_b
         
-        numerator = np.sum(errors ** 2)
-        denominator = grad_w @ (X_batch.T @ X_batch) @ grad_w + n * grad_b ** 2
+        numerator = grad_w @ grad_w + grad_b ** 2
+        denominator = 2 * (np.mean(direction ** 2) + self.l2_reg * (grad_w @ grad_w))
         
         if denominator > 1e-8:
-            optimal_lr = numerator / (denominator + 1e-8)
-            return np.clip(optimal_lr, 0.001, 0.1)
+            optimal_lr = numerator / denominator
+            return np.clip(optimal_lr, 0.001, 1.0)
         return self.lr
     
-    def sample_by_margin(self, X, y, batch_size):
+    def sample_by_margin(self, X, y, batch_size, temperature=1.0):
         margins = np.abs(self.compute_margin(X, y))
-        probabilities = 1.0 / (margins + 1e-8)
+        probabilities = np.exp(-(margins - margins.min()) / temperature)
         probabilities /= probabilities.sum()
         
         indices = np.random.choice(len(X), size=min(batch_size, len(X)), 
-                                   replace=False, p=probabilities)
+                                   replace=True, p=probabilities)
         return X[indices], y[indices]
     
     def fit(self, X, y, init_method='correlation'):
@@ -85,6 +80,9 @@ class LinearClassifier:
         self.v_w = np.zeros(n_features)
         self.v_b = 0.0
         self.loss_history = []
+        Q = self.compute_loss(X, y)
+        self.q_history = [Q]
+        self.loss_history = [Q]
         
         for epoch in range(self.n_epochs):
             indices = np.random.permutation(n_samples)
@@ -99,6 +97,7 @@ class LinearClassifier:
                     X_batch = X_shuffled[i:i + batch_size]
                     y_batch = y_shuffled[i:i + batch_size]
                 
+                batch_loss = self.compute_loss(X_batch, y_batch)
                 grad_w, grad_b = self.compute_gradient(X_batch, y_batch)
                 
                 if self.use_fastest_descent:
@@ -106,17 +105,21 @@ class LinearClassifier:
                 else:
                     current_lr = self.lr
                 
-                self.v_w = self.momentum * self.v_w - current_lr * grad_w
-                self.v_b = self.momentum * self.v_b - current_lr * grad_b
+                self.v_w = self.momentum * self.v_w + (1 - self.momentum) * current_lr * grad_w
+                self.v_b = self.momentum * self.v_b + (1 - self.momentum) * current_lr * grad_b
                 
-                self.w += self.v_w
-                self.b += self.v_b
+                self.w -= self.v_w
+                self.b -= self.v_b
+                
+                lam = len(y_batch) / n_samples
+                Q = lam * batch_loss + (1 - lam) * Q
             
             loss = self.compute_loss(X, y)
             self.loss_history.append(loss)
+            self.q_history.append(Q)
             
             if (epoch + 1) % 20 == 0:
-                print(f"Epoch {epoch + 1}/{self.n_epochs}, Loss: {loss:.4f}")
+                print(f"Epoch {epoch + 1}/{self.n_epochs}, Loss: {loss:.4f}, Q (рекуррентная): {Q:.4f}")
     
     def predict(self, X):
         return np.sign(X @ self.w + self.b)
@@ -177,7 +180,57 @@ def visualize_loss(loss_histories, labels):
     plt.close()
 
 
+def classification_metrics(y_true, y_pred):
+    tp = np.sum((y_pred == 1) & (y_true == 1))
+    fp = np.sum((y_pred == 1) & (y_true == -1))
+    fn = np.sum((y_pred == -1) & (y_true == 1))
+    tn = np.sum((y_pred == -1) & (y_true == -1))
+    precision = tp / (tp + fp) if tp + fp > 0 else 0.0
+    recall = tp / (tp + fn) if tp + fn > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
+    return precision, recall, f1, np.array([[tn, fp], [fn, tp]])
+
+
+def print_metrics(name, y_true, y_pred):
+    precision, recall, f1, cm = classification_metrics(y_true, y_pred)
+    print(f"   {name}: accuracy {np.mean(y_true == y_pred):.4f}, precision {precision:.4f}, "
+          f"recall {recall:.4f}, f1 {f1:.4f}")
+    print(f"   Матрица ошибок (строки - истинный класс, столбцы - предсказанный): {cm.tolist()}")
+
+
+def check_gradient(clf, X, y, eps=1e-6):
+    grad_w, grad_b = clf.compute_gradient(X, y)
+    analytic = np.append(grad_w, grad_b)
+    params = np.append(clf.w, clf.b)
+    numeric = np.zeros_like(params)
+    for j in range(len(params)):
+        step = np.zeros_like(params)
+        step[j] = eps
+        clf.w, clf.b = (params + step)[:-1], (params + step)[-1]
+        up = clf.compute_loss(X, y)
+        clf.w, clf.b = (params - step)[:-1], (params - step)[-1]
+        down = clf.compute_loss(X, y)
+        numeric[j] = (up - down) / (2 * eps)
+    clf.w, clf.b = params[:-1], params[-1]
+    return np.abs(analytic - numeric).max()
+
+
+def visualize_recurrent_q(clf, filename='recurrent_q.png'):
+    plt.figure(figsize=(10, 6))
+    plt.plot(clf.loss_history, label='Риск по всей выборке', linewidth=2)
+    plt.plot(clf.q_history, label='Рекуррентная оценка Q', linewidth=2)
+    plt.xlabel('Эпоха', fontsize=12)
+    plt.ylabel('Функционал качества', fontsize=12)
+    plt.title('Рекуррентная оценка функционала качества', fontsize=14)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300)
+    plt.close()
+
+
 def main():
+    np.random.seed(42)
     print("="*60)
     print("Лабораторная работа №1: Линейная классификация")
     print("="*60)
@@ -188,32 +241,37 @@ def main():
     print(f"   Test: {X_test.shape[0]} объектов")
     
     print("\n2. Обучение с инициализацией через корреляцию...")
-    clf1 = LinearClassifier(learning_rate=0.01, momentum=0.9, l2_reg=0.001, n_epochs=100)
+    clf1 = LinearClassifier(learning_rate=0.1, momentum=0.9, l2_reg=0.001, n_epochs=100)
     clf1.fit(X_train, y_train, init_method='correlation')
     train_acc1 = clf1.score(X_train, y_train)
     test_acc1 = clf1.score(X_test, y_test)
     print(f"   Train accuracy: {train_acc1:.4f}")
     print(f"   Test accuracy: {test_acc1:.4f}")
     visualize_margins(clf1, X_test, y_test, "Инициализация через корреляцию")
+    visualize_recurrent_q(clf1)
+    print(f"   Q (рекуррентная) = {clf1.q_history[-1]:.4f}, риск по выборке = {clf1.loss_history[-1]:.4f}")
+    print_metrics("Тест", y_test, clf1.predict(X_test))
+    print(f"   Макс. расхождение аналитич. и численного градиента: {check_gradient(clf1, X_train, y_train):.2e}")
     
     print("\n3. Обучение со случайной инициализацией (мультистарт)...")
     best_clf = None
-    best_acc = 0
+    best_risk = np.inf
     n_starts = 5
     for i in range(n_starts):
         np.random.seed(42 + i)
-        clf = LinearClassifier(learning_rate=0.01, momentum=0.9, l2_reg=0.001, n_epochs=100)
+        clf = LinearClassifier(learning_rate=0.1, momentum=0.9, l2_reg=0.001, n_epochs=100)
         clf.fit(X_train, y_train, init_method='random')
-        acc = clf.score(X_test, y_test)
-        print(f"   Старт {i+1}: Test accuracy = {acc:.4f}")
-        if acc > best_acc:
-            best_acc = acc
+        risk = clf.compute_loss(X_train, y_train)
+        print(f"   Старт {i+1}: риск на обучении = {risk:.4f}")
+        if risk < best_risk:
+            best_risk = risk
             best_clf = clf
-    print(f"   Лучший результат: {best_acc:.4f}")
+    best_acc = best_clf.score(X_test, y_test)
+    print(f"   Лучший запуск (по риску на обучении {best_risk:.4f}): Test accuracy = {best_acc:.4f}")
     visualize_margins(best_clf, X_test, y_test, "Мультистарт - лучшая модель")
     
     print("\n4. Обучение со скорейшим градиентным спуском...")
-    clf_fastest = LinearClassifier(learning_rate=0.01, momentum=0.9, l2_reg=0.001, 
+    clf_fastest = LinearClassifier(learning_rate=0.1, momentum=0.9, l2_reg=0.001, 
                                    n_epochs=100, use_fastest_descent=True)
     clf_fastest.fit(X_train, y_train, init_method='correlation')
     train_acc_fastest = clf_fastest.score(X_train, y_train)
@@ -223,7 +281,7 @@ def main():
     visualize_margins(clf_fastest, X_test, y_test, "Скорейший градиентный спуск")
     
     print("\n5. Обучение с предъявлением по модулю отступа...")
-    clf_margin = LinearClassifier(learning_rate=0.01, momentum=0.9, l2_reg=0.001, 
+    clf_margin = LinearClassifier(learning_rate=0.1, momentum=0.9, l2_reg=0.001, 
                                   n_epochs=100, use_margin_sampling=True)
     clf_margin.fit(X_train, y_train, init_method='random')
     train_acc_margin = clf_margin.score(X_train, y_train)
@@ -233,15 +291,18 @@ def main():
     visualize_margins(clf_margin, X_test, y_test, "Предъявление по модулю отступа")
     
     print("\n6. Сравнение с эталонной реализацией (sklearn)...")
+    l2 = 0.001
     baseline = SGDClassifier(
-        loss='squared_hinge', penalty='l2', alpha=0.001,
-        learning_rate='constant', eta0=0.01, max_iter=100, random_state=42
+        loss='squared_error', penalty='l2', alpha=2 * l2,
+        learning_rate='constant', eta0=0.01, max_iter=100, tol=None, random_state=42
     )
     baseline.fit(X_train, y_train)
-    baseline_train = baseline.score(X_train, y_train)
     baseline_test = baseline.score(X_test, y_test)
-    print(f"   Train accuracy: {baseline_train:.4f}")
-    print(f"   Test accuracy: {baseline_test:.4f}")
+    print_metrics("sklearn SGDClassifier", y_test, baseline.predict(X_test))
+    ridge = RidgeClassifier(alpha=len(y_train) * l2)
+    ridge.fit(X_train, y_train)
+    print_metrics("sklearn RidgeClassifier", y_test, ridge.predict(X_test))
+    print_metrics("Своя реализация", y_test, clf1.predict(X_test))
     
     print("\n7. Визуализация истории обучения...")
     visualize_loss([clf1.loss_history, best_clf.loss_history, clf_fastest.loss_history, clf_margin.loss_history], 
