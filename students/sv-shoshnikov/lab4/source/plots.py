@@ -104,6 +104,7 @@ def plot_ridge(data, filename):
     for ax, (name, d) in zip(np.atleast_1d(axes), data.items()):
         ax.semilogx(d["taus"], d["ridge_cv"], "o-", label="Ridge: R^2 (кросс-валидация)")
         ax.axvline(d["tau_best"], color="tab:red", alpha=0.6, label=f"tau* = {d['tau_best']:.3g}")
+        ax.axvline(d["tau_gcv"], color="tab:green", linestyle="--", alpha=0.8, label=f"tau по GCV = {d['tau_gcv']:.3g}")
         ax.axhline(d["ols_cv"], color="gray", linestyle=":", label="МНК (tau = 0): R^2 (CV)")
         ax.set_xlabel("коэффициент регуляризации tau")
         ax.set_ylabel("R^2 (кросс-валидация)")

@@ -54,3 +54,18 @@ def cv_scores(X, y, method, params, folds=5, seed=42):
         np.mean([r2_score(y[b], SVDRegression(method, p).fit(X[a], y[a]).predict(X[b])) for a, b in splits])
         for p in params
     ])
+
+
+def gcv_scores(X, y, taus):
+    """Обобщённая кросс-валидация для Ridge: GCV(tau) = ||y - y_hat||^2 / (n - 1 - tr H)^2, tr H = sum_j f_j."""
+    X, y = np.asarray(X, dtype=float), np.asarray(y, dtype=float)
+    Z = (X - X.mean(axis=0)) / X.std(axis=0)
+    yc = y - y.mean()
+    U, s, _ = np.linalg.svd(Z, full_matrices=False)
+    coef = U.T @ yc
+    out = []
+    for tau in taus:
+        f = s ** 2 / (s ** 2 + tau)
+        resid = yc - U @ (f * coef)
+        out.append(resid @ resid / (len(y) - 1.0 - f.sum()) ** 2)
+    return np.array(out)

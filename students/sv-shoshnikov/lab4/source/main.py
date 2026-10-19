@@ -12,7 +12,7 @@ from sklearn.preprocessing import StandardScaler
 from pca import PCASVD, effective_dimension, kaiser, steep_slope
 from plots import (plot_correlations, plot_loadings, plot_projection, plot_regression_k,
                    plot_ridge, plot_spectrum)
-from regression import SVDRegression, cv_scores
+from regression import SVDRegression, cv_scores, gcv_scores
 
 SEED = 42
 OUT = Path(__file__).resolve().parent.parent
@@ -89,6 +89,7 @@ def regression_section(d):
     ridge_cv = cv_scores(Xtr, ytr, "ridge", taus)
     ols_cv = cv_scores(Xtr, ytr, "ols", [None])[0]
     k_best, tau_best = int(ks[np.argmax(pcr_cv)]), float(taus[np.argmax(ridge_cv)])
+    tau_gcv = float(taus[np.argmin(gcv_scores(Xtr, ytr, taus))])
 
     print("\nPCR: R2 в зависимости от числа компонент k")
     print("   k        " + " ".join(f"{k:>6}" for k in ks))
@@ -107,9 +108,10 @@ def regression_section(d):
         print(f"   {name:<22} {r2_score(yte, pred):>8.4f} {mean_squared_error(yte, pred) ** 0.5:>10.4f} "
               f"{np.linalg.norm(m.w_):>8.3f} {m.degrees_of_freedom():>17.3f}")
     d.update(ks=ks, pcr_cv=pcr_cv, pcr_test=pcr_test, ols_test=r2_score(yte, models["МНК (все признаки)"].predict(Xte)),
-             k_best=k_best, taus=taus, ridge_cv=ridge_cv, tau_best=tau_best, ols_cv=ols_cv)
+             k_best=k_best, tau_gcv=tau_gcv, taus=taus, ridge_cv=ridge_cv, tau_best=tau_best, ols_cv=ols_cv)
     print(f"   Выбор по CV: k* = {k_best} (R2 {pcr_cv.max():.4f}), tau* = {tau_best:.3g} (R2 {ridge_cv.max():.4f}), "
           f"МНК R2 {ols_cv:.4f}")
+    print(f"   tau по GCV (без разбиения на блоки): {tau_gcv:.3g}")
 
     ols, ridge, pcr = fitted.values()
     Z = ols.transform(Xtr)
